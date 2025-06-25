@@ -1,5 +1,6 @@
 """
 Gestion de la base de données pour HyperEVM Monitor
+Version étendue avec scanner de wallets
 """
 
 import sqlite3
@@ -68,12 +69,49 @@ class Database:
             )
         ''')
         
-        # Index pour les performances
+        # NOUVELLES TABLES POUR LE SCANNER DE WALLETS
+        
+        # Table des holdings de tokens par wallet
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS wallet_tokens (
+                wallet_address TEXT,
+                token_address TEXT,
+                balance TEXT,
+                balance_formatted TEXT,
+                balance_usd TEXT DEFAULT NULL,
+                last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                scan_status TEXT DEFAULT 'detected',
+                PRIMARY KEY (wallet_address, token_address),
+                FOREIGN KEY (wallet_address) REFERENCES wallets(address),
+                FOREIGN KEY (token_address) REFERENCES tokens(address)
+            )
+        ''')
+        
+        # Table de progression du scan
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS wallet_scan_progress (
+                id INTEGER PRIMARY KEY DEFAULT 1,
+                total_wallets INTEGER DEFAULT 0,
+                scanned_wallets INTEGER DEFAULT 0,
+                current_wallet TEXT,
+                started_at TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                status TEXT DEFAULT 'idle'
+            )
+        ''')
+        
+        # Index pour les performances (originaux + nouveaux)
         conn.execute('CREATE INDEX IF NOT EXISTS idx_last_block ON wallets(last_activity_block)')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_address_type ON wallets(address_type)')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_stats_date ON wallet_activity_stats(date)')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_tokens_discovered ON tokens(discovered_at)')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_tokens_status ON tokens(status)')
+        
+        # Nouveaux index pour le scanner
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_wallet_tokens_wallet ON wallet_tokens(wallet_address)')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_wallet_tokens_token ON wallet_tokens(token_address)')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_wallet_tokens_updated ON wallet_tokens(last_updated)')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_wallet_tokens_status ON wallet_tokens(scan_status)')
         
         conn.commit()
         conn.close()
@@ -236,7 +274,199 @@ class Database:
         conn.commit()
         conn.close()
     
-    # Méthodes pour le web viewer
+    # ===== NOUVELLES MÉTHODES POUR LE SCANNER DE WALLETS ===== #
+    
+    def save_wallet_tokens(self, wallet_address: str, tokens_data: Dict[str, Dict]):
+        """Sauvegarde les tokens d'un wallet"""
+        if not tokens_data:
+            return
+        
+        conn = sqlite3.connect(self.db_path)
+        
+        # Supprimer les anciens tokens de ce wallet
+        conn.execute('DELETE FROM wallet_tokens WHERE wallet_address = ?', (wallet_address,))
+        
+        # Insérer les nouveaux tokens
+        for token_address, token_info in tokens_data.items():
+            balance = token_info.get('balance', '0')
+            balance_formatted = token_info.get('balance_formatted', '0')
+            
+            conn.execute('''
+                INSERT INTO wallet_tokens 
+                (wallet_address, token_address, balance, balance_formatted, last_updated)
+                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ''', (wallet_address, token_address, balance, balance_formatted))
+        
+        conn.commit()
+        conn.close()
+    
+    def get_wallet_tokens(self, wallet_address: str) -> List[Dict]:
+        """Récupère les tokens d'un wallet avec infos détaillées"""
+        conn = sqlite3.connect(self.db_path)
+        
+        cursor = conn.execute('''
+            SELECT 
+                wt.token_address,
+                wt.balance,
+                wt.balance_formatted,
+                wt.last_updated,
+                t.name,
+                t.symbol,
+                t.decimals,
+                t.total_supply
+            FROM wallet_tokens wt
+            LEFT JOIN tokens t ON wt.token_address = t.address
+            WHERE wt.wallet_address = ?
+            ORDER BY CAST(wt.balance as INTEGER) DESC
+        ''', (wallet_address,))
+        
+        tokens = []
+        for row in cursor.fetchall():
+            tokens.append({
+                'token_address': row[0],
+                'balance': row[1],
+                'balance_formatted': row[2] or '0',
+                'last_updated': row[3],
+                'name': row[4] or 'Unknown Token',
+                'symbol': row[5] or 'UNK',
+                'decimals': row[6] or 18,
+                'total_supply': row[7] or '0'
+            })
+        
+        conn.close()
+        return tokens
+    
+    def get_wallet_details(self, wallet_address: str) -> Optional[Dict]:
+        """Récupère les détails complets d'un wallet"""
+        conn = sqlite3.connect(self.db_path)
+        
+        # Infos de base du wallet
+        cursor = conn.execute('''
+            SELECT address, address_type, last_activity_block, 
+                   last_activity_timestamp, updated_at
+            FROM wallets 
+            WHERE address = ?
+        ''', (wallet_address,))
+        
+        wallet_info = cursor.fetchone()
+        if not wallet_info:
+            conn.close()
+            return None
+        
+        # Statistiques des tokens
+        cursor = conn.execute('''
+            SELECT 
+                COUNT(*) as token_count,
+                MAX(last_updated) as last_scan
+            FROM wallet_tokens 
+            WHERE wallet_address = ?
+        ''', (wallet_address,))
+        
+        token_stats = cursor.fetchone()
+        
+        conn.close()
+        
+        try:
+            last_activity = datetime.fromtimestamp(int(wallet_info[3])).strftime('%Y-%m-%d %H:%M:%S') if wallet_info[3] else 'N/A'
+        except:
+            last_activity = 'N/A'
+        
+        return {
+            'address': wallet_info[0],
+            'type': wallet_info[1],
+            'last_activity_block': wallet_info[2],
+            'last_activity_timestamp': wallet_info[3],
+            'last_activity_formatted': last_activity,
+            'updated_at': wallet_info[4],
+            'token_count': token_stats[0] if token_stats else 0,
+            'last_token_scan': token_stats[1] if token_stats else None
+        }
+    
+    def get_wallets_for_scan(self, limit: int = 100000, offset: int = 0) -> List[str]:
+        """Récupère les wallets à scanner (type='wallet' uniquement)"""
+        conn = sqlite3.connect(self.db_path)
+        
+        cursor = conn.execute('''
+            SELECT address FROM wallets 
+            WHERE address_type = 'wallet'
+            ORDER BY last_activity_block DESC
+            LIMIT ? OFFSET ?
+        ''', (limit, offset))
+        
+        wallets = [row[0] for row in cursor.fetchall()]
+        conn.close()
+        return wallets
+    
+    def get_wallet_scan_stats(self) -> Dict:
+        """Statistiques du scan de wallets"""
+        conn = sqlite3.connect(self.db_path)
+        
+        # Nombre total de wallets
+        cursor = conn.execute("SELECT COUNT(*) FROM wallets WHERE address_type = 'wallet'")
+        total_wallets = cursor.fetchone()[0]
+        
+        # Wallets scannés (avec au moins un token)
+        cursor = conn.execute("SELECT COUNT(DISTINCT wallet_address) FROM wallet_tokens")
+        scanned_wallets = cursor.fetchone()[0]
+        
+        # Tokens uniques détectés
+        cursor = conn.execute("SELECT COUNT(DISTINCT token_address) FROM wallet_tokens")
+        unique_tokens = cursor.fetchone()[0]
+        
+        # Holdings totaux
+        cursor = conn.execute("SELECT COUNT(*) FROM wallet_tokens")
+        total_holdings = cursor.fetchone()[0]
+        
+        # Progression actuelle
+        cursor = conn.execute("SELECT * FROM wallet_scan_progress WHERE id = 1")
+        progress = cursor.fetchone()
+        
+        conn.close()
+        
+        return {
+            'total_wallets': total_wallets,
+            'scanned_wallets': scanned_wallets,
+            'unique_tokens': unique_tokens,
+            'total_holdings': total_holdings,
+            'scan_progress': {
+                'status': progress[6] if progress else 'idle',
+                'current_wallet': progress[3] if progress else None,
+                'progress_percent': round((progress[2] / progress[1] * 100) if progress and progress[1] > 0 else 0, 1)
+            } if progress else None
+        }
+    
+    def update_scan_progress(self, status: str, current_wallet: str = None, 
+                            scanned: int = None, total: int = None):
+        """Met à jour la progression du scan"""
+        conn = sqlite3.connect(self.db_path)
+        
+        if total is not None:
+            # Nouveau scan
+            conn.execute('''
+                INSERT OR REPLACE INTO wallet_scan_progress 
+                (id, total_wallets, scanned_wallets, current_wallet, started_at, status)
+                VALUES (1, ?, ?, ?, CURRENT_TIMESTAMP, ?)
+            ''', (total, scanned or 0, current_wallet, status))
+        else:
+            # Mise à jour
+            if scanned is not None:
+                conn.execute('''
+                    UPDATE wallet_scan_progress 
+                    SET scanned_wallets = ?, current_wallet = ?, status = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = 1
+                ''', (scanned, current_wallet, status))
+            else:
+                conn.execute('''
+                    UPDATE wallet_scan_progress 
+                    SET current_wallet = ?, status = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = 1
+                ''', (current_wallet, status))
+        
+        conn.commit()
+        conn.close()
+    
+    # ===== MÉTHODES WEB VIEWER (originales) ===== #
+    
     def get_wallet_count(self, search: str = None, address_type: str = None) -> int:
         """Compte le nombre de wallets avec filtres"""
         conn = sqlite3.connect(self.db_path)

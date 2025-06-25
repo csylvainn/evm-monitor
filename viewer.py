@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-HyperEVM Wallet Viewer - Version refactorisée professionnelle
+HyperEVM Wallet Viewer - Version complète avec scanner de wallets
 Interface web moderne et minimaliste avec architecture clean
-Version 3.0 - Code optimisé et maintenable
+Version 4.0 - Code optimisé avec détails des wallets
 """
 
 import sys
 import os
 import json
+import time
 from pathlib import Path
 
 # Configuration des chemins
@@ -51,13 +52,530 @@ response_helper = ResponseHelper()
 class WebConstants:
     """Constantes pour l'interface web"""
     DEFAULT_PAGE = 1
-    VALID_ENDPOINTS = ['tokens', 'activity_stats']
+    VALID_ENDPOINTS = ['tokens', 'activity_stats', 'wallet']
     ERROR_MESSAGES = {
         'not_found': "🚫 Page Not Found",
         'server_error': "⚠️ Server Error", 
         'not_found_desc': "The page you're looking for doesn't exist.",
-        'server_error_desc': "Something went wrong. Please try again later."
+        'server_error_desc': "Something went wrong. Please try again later.",
+        'wallet_not_found': "Wallet not found in database.",
+        'invalid_address': "Invalid wallet address format."
     }
+
+
+# Template pour les détails du wallet
+WALLET_DETAIL_TEMPLATE = '''
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Wallet {{ wallet.address[:8] }}... - HyperEVM</title>
+    <style>
+        /* Variables CSS pour le dark mode */
+        :root {
+            --bg-primary: #0d1117;
+            --bg-secondary: #161b22;
+            --bg-tertiary: #21262d;
+            --bg-hover: #30363d;
+            --text-primary: #f0f6fc;
+            --text-secondary: #8b949e;
+            --text-muted: #656d76;
+            --border-primary: #30363d;
+            --border-secondary: #21262d;
+            --accent-blue: #58a6ff;
+            --accent-green: #3fb950;
+            --accent-orange: #f85149;
+            --accent-purple: #a5a5f5;
+            --accent-yellow: #d29922;
+            --shadow: rgba(0, 0, 0, 0.4);
+            --radius-small: 6px;
+            --radius-medium: 8px;
+            --radius-large: 12px;
+            --transition-fast: 0.15s ease;
+            --transition-normal: 0.2s ease;
+        }
+        
+        /* Reset et base */
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            line-height: 1.6;
+            overflow-x: hidden;
+        }
+        
+        /* Layout */
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 0 20px;
+        }
+        
+        /* Header */
+        .header {
+            background: var(--bg-secondary);
+            border-bottom: 1px solid var(--border-primary);
+            padding: 20px 0;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            backdrop-filter: blur(12px);
+        }
+        
+        .header-content {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .logo {
+            font-size: 24px;
+            font-weight: 700;
+            color: var(--accent-blue);
+            text-decoration: none;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        
+        .refresh-btn {
+            background: var(--accent-green);
+            color: var(--bg-primary);
+            padding: 10px 20px;
+            border: none;
+            border-radius: 8px;
+            text-decoration: none;
+            font-weight: 600;
+            font-size: 14px;
+            transition: all 0.2s ease;
+        }
+        
+        .refresh-btn:hover {
+            background: #2ea043;
+            transform: translateY(-1px);
+        }
+        
+        /* Main content */
+        .main {
+            padding: 32px 0;
+            min-height: calc(100vh - 200px);
+        }
+        
+        /* Breadcrumb */
+        .breadcrumb {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-primary);
+            border-radius: var(--radius-medium);
+            padding: 12px 20px;
+            margin-bottom: 24px;
+            font-size: 14px;
+        }
+        
+        .breadcrumb a {
+            color: var(--accent-blue);
+            text-decoration: none;
+        }
+        
+        .breadcrumb a:hover {
+            text-decoration: underline;
+        }
+        
+        .breadcrumb-separator {
+            color: var(--text-muted);
+            margin: 0 8px;
+        }
+        
+        /* Wallet header */
+        .wallet-header {
+            background: linear-gradient(135deg, var(--bg-secondary), var(--bg-tertiary));
+            border: 1px solid var(--border-primary);
+            border-radius: var(--radius-large);
+            padding: 24px;
+            margin-bottom: 24px;
+            position: relative;
+            overflow: hidden;
+        }
+        
+        .wallet-header::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 4px;
+            background: linear-gradient(90deg, var(--accent-blue), var(--accent-green));
+        }
+        
+        .wallet-address {
+            font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
+            font-size: 18px;
+            font-weight: 600;
+            color: var(--accent-blue);
+            word-break: break-all;
+            margin-bottom: 16px;
+        }
+        
+        .wallet-stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 16px;
+            margin-top: 20px;
+        }
+        
+        .stat-card {
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border-secondary);
+            border-radius: var(--radius-medium);
+            padding: 16px;
+            text-align: center;
+        }
+        
+        .stat-value {
+            font-size: 24px;
+            font-weight: 700;
+            color: var(--accent-blue);
+            display: block;
+            margin-bottom: 4px;
+        }
+        
+        .stat-label {
+            font-size: 12px;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        
+        /* Badges */
+        .badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px 12px;
+            border-radius: var(--radius-small);
+            font-size: 12px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        
+        .badge-wallet { 
+            background: rgba(63, 185, 80, 0.1); 
+            color: var(--accent-green);
+            border: 1px solid rgba(63, 185, 80, 0.2);
+        }
+        
+        /* Tokens section */
+        .tokens-section {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-primary);
+            border-radius: var(--radius-large);
+            overflow: hidden;
+        }
+        
+        .section-header {
+            background: var(--bg-tertiary);
+            padding: 20px 24px;
+            border-bottom: 1px solid var(--border-primary);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .section-title {
+            font-size: 18px;
+            font-weight: 600;
+            color: var(--text-primary);
+            margin: 0;
+        }
+        
+        .rescan-btn {
+            background: var(--accent-green);
+            color: var(--bg-primary);
+            padding: 8px 16px;
+            border: none;
+            border-radius: var(--radius-medium);
+            font-size: 12px;
+            font-weight: 600;
+            text-decoration: none;
+            transition: var(--transition-normal);
+        }
+        
+        .rescan-btn:hover {
+            background: #2ea043;
+            transform: translateY(-1px);
+        }
+        
+        /* Table */
+        .tokens-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        
+        .tokens-table th {
+            background: var(--bg-tertiary);
+            padding: 16px 20px;
+            font-size: 13px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            text-align: left;
+        }
+        
+        .tokens-table td {
+            padding: 16px 20px;
+            vertical-align: middle;
+            border-bottom: 1px solid var(--border-secondary);
+        }
+        
+        .tokens-table tr:hover {
+            background: var(--bg-hover);
+        }
+        
+        .tokens-table tr:last-child td {
+            border-bottom: none;
+        }
+        
+        .token-info {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        
+        .token-symbol {
+            background: var(--accent-purple);
+            color: var(--bg-primary);
+            padding: 4px 8px;
+            border-radius: var(--radius-small);
+            font-weight: 700;
+            font-size: 11px;
+            text-transform: uppercase;
+        }
+        
+        .token-name {
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+        
+        .token-address {
+            font-family: 'SF Mono', Monaco, monospace;
+            font-size: 11px;
+            color: var(--text-muted);
+        }
+        
+        .balance-main {
+            font-size: 16px;
+            font-weight: 600;
+            color: var(--accent-green);
+        }
+        
+        .balance-raw {
+            font-family: 'SF Mono', Monaco, monospace;
+            font-size: 11px;
+            color: var(--text-muted);
+            margin-top: 2px;
+        }
+        
+        /* No data */
+        .no-tokens {
+            text-align: center;
+            padding: 64px 32px;
+            color: var(--text-muted);
+        }
+        
+        .no-tokens h3 {
+            margin-bottom: 12px;
+            color: var(--text-secondary);
+        }
+        
+        /* Footer */
+        .footer {
+            border-top: 1px solid var(--border-primary);
+            padding: 24px 0;
+            text-align: center;
+            color: var(--text-muted);
+            font-size: 12px;
+            margin-top: 48px;
+        }
+        
+        /* Responsive */
+        @media (max-width: 768px) {
+            .container { padding: 0 16px; }
+            .header-content { flex-direction: column; gap: 16px; }
+            .wallet-address { font-size: 14px; }
+            .wallet-stats { grid-template-columns: 1fr 1fr; }
+            .tokens-table { font-size: 12px; }
+            .tokens-table th, .tokens-table td { padding: 12px 8px; }
+        }
+    </style>
+</head>
+<body>
+    <!-- Header -->
+    <header class="header">
+        <div class="container">
+            <div class="header-content">
+                <a href="/" class="logo">
+                    🔗 HyperEVM Monitor
+                </a>
+                <a href="/wallet/{{ wallet.address }}" class="refresh-btn">
+                    🔄 Refresh
+                </a>
+            </div>
+        </div>
+    </header>
+    
+    <!-- Main content -->
+    <main class="main">
+        <div class="container">
+            <!-- Breadcrumb -->
+            <div class="breadcrumb">
+                <a href="/">🏠 All Addresses</a>
+                <span class="breadcrumb-separator">›</span>
+                <a href="/?type=wallet">👤 Wallets</a>
+                <span class="breadcrumb-separator">›</span>
+                <span>{{ wallet.address[:8] }}...{{ wallet.address[-6:] }}</span>
+            </div>
+
+            <!-- Wallet Header -->
+            <div class="wallet-header">
+                <div style="display: flex; justify-content: between; align-items: flex-start; margin-bottom: 16px;">
+                    <div style="flex: 1;">
+                        <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 8px;">
+                            <span class="badge badge-wallet">👤 Wallet</span>
+                            {% if wallet.last_token_scan %}
+                                <span style="font-size: 12px; color: var(--accent-green);">
+                                    ✅ Scanned
+                                </span>
+                            {% else %}
+                                <span style="font-size: 12px; color: var(--text-muted);">
+                                    ⏳ Not scanned yet
+                                </span>
+                            {% endif %}
+                        </div>
+                        <div class="wallet-address">{{ wallet.address }}</div>
+                    </div>
+                </div>
+                
+                <div class="wallet-stats">
+                    <div class="stat-card">
+                        <span class="stat-value">{{ "{:,}".format(wallet.token_count) }}</span>
+                        <span class="stat-label">Tokens Held</span>
+                    </div>
+                    <div class="stat-card">
+                        <span class="stat-value">{{ "{:,}".format(wallet.last_activity_block or 0) }}</span>
+                        <span class="stat-label">Last Block</span>
+                    </div>
+                    <div class="stat-card">
+                        <span class="stat-value">{{ wallet.last_activity_formatted }}</span>
+                        <span class="stat-label">Last Activity</span>
+                    </div>
+                    <div class="stat-card">
+                        <span class="stat-value">
+                            {% if wallet.last_token_scan %}
+                                {{ wallet.last_token_scan[:10] }}
+                            {% else %}
+                                Never
+                            {% endif %}
+                        </span>
+                        <span class="stat-label">Token Scan</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Tokens Section -->
+            <div class="tokens-section">
+                <div class="section-header">
+                    <h2 class="section-title">🪙 Token Holdings</h2>
+                    <a href="#" class="rescan-btn" onclick="showRescanInfo()">
+                        🔄 Rescan Tokens
+                    </a>
+                </div>
+                
+                {% if tokens %}
+                <table class="tokens-table">
+                    <thead>
+                        <tr>
+                            <th>Token</th>
+                            <th>Balance</th>
+                            <th>Contract Address</th>
+                            <th>Last Updated</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for token in tokens %}
+                        <tr>
+                            <td>
+                                <div class="token-info">
+                                    <span class="token-symbol">{{ token.symbol }}</span>
+                                    <div>
+                                        <div class="token-name">{{ token.name }}</div>
+                                        <div style="font-size: 11px; color: var(--text-muted);">
+                                            {{ token.decimals }} decimals
+                                        </div>
+                                    </div>
+                                </div>
+                            </td>
+                            <td>
+                                <div class="balance-main">{{ token.balance_formatted }}</div>
+                                <div class="balance-raw">{{ format_number(token.balance) }} raw</div>
+                            </td>
+                            <td>
+                                <div class="token-address">{{ token.token_address }}</div>
+                            </td>
+                            <td style="font-family: 'SF Mono', Monaco, monospace; font-size: 12px;">
+                                {{ token.last_updated[:16] if token.last_updated else 'N/A' }}
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+                {% else %}
+                <div class="no-tokens">
+                    {% if wallet.last_token_scan %}
+                        <h3>💰 No Tokens Found</h3>
+                        <p>This wallet doesn't hold any ERC-20 tokens, or all balances are zero.</p>
+                    {% else %}
+                        <h3>🔍 Wallet Not Scanned Yet</h3>
+                        <p>Run the wallet scanner to detect token holdings for this address.</p>
+                        <div style="margin-top: 16px;">
+                            <code style="background: var(--bg-tertiary); padding: 8px 12px; border-radius: 4px; font-size: 12px;">
+                                python simple_scan_wallets.py
+                            </code>
+                        </div>
+                    {% endif %}
+                </div>
+                {% endif %}
+            </div>
+
+            {% if tokens %}
+            <!-- Summary -->
+            <div style="margin-top: 24px; padding: 16px; background: var(--bg-secondary); border: 1px solid var(--border-primary); border-radius: var(--radius-medium); font-size: 14px; color: var(--text-muted);">
+                📊 Summary: {{ tokens|length }} token holdings found
+                {% if wallet.last_token_scan %}
+                    • Last scan: {{ wallet.last_token_scan[:16] }}
+                {% endif %}
+            </div>
+            {% endif %}
+        </div>
+    </main>
+    
+    <!-- Footer -->
+    <footer class="footer">
+        <div class="container">
+            Real-time HyperEVM blockchain monitoring | Auto-discovery & classification
+        </div>
+    </footer>
+    
+    <script>
+        function showRescanInfo() {
+            alert('To rescan this wallet, run:\\n\\npython simple_scan_wallets.py --test-wallet {{ wallet.address }}\\n\\nOr wait for the next full scan.');
+        }
+    </script>
+</body>
+</html>
+'''
 
 
 # === MIDDLEWARE ET HELPERS === #
@@ -242,6 +760,40 @@ def activity_stats():
         return handle_server_error(e)
 
 
+@app.route('/wallet/<address>')
+def wallet_detail(address):
+    """Page de détails d'un wallet avec ses tokens"""
+    try:
+        # Validation de l'adresse
+        if not address or len(address) != 42 or not address.startswith('0x'):
+            return render_with_common_context(
+                response_helper.render_error(404, "Invalid Address", "The wallet address is not valid.")
+            ), 404
+        
+        # Récupérer les détails du wallet
+        wallet = db.get_wallet_details(address.lower())
+        if not wallet:
+            return render_with_common_context(
+                response_helper.render_error(404, "Wallet Not Found", "This wallet address was not found in the database.")
+            ), 404
+        
+        # Récupérer les tokens du wallet
+        tokens = db.get_wallet_tokens(address.lower())
+        
+        # Contexte pour le template
+        context = {
+            'wallet': wallet,
+            'tokens': tokens,
+            'format_number': format_number
+        }
+        
+        return render_template_string(WALLET_DETAIL_TEMPLATE, **context)
+        
+    except Exception as e:
+        app.logger.error(f"Erreur dans wallet_detail({address}): {e}")
+        return handle_server_error(e)
+
+
 # === API ENDPOINTS === #
 
 @app.route('/api/stats')
@@ -258,7 +810,7 @@ def api_stats():
                 'token_stats': g.token_stats,
                 'overview': db.get_activity_overview(),
                 'timestamp': formatter.format_number(
-                    int(os.path.getmtime(__file__))
+                    int(time.time())
                 )
             }
         )
@@ -271,6 +823,64 @@ def api_stats():
             error=str(e)
         )
         return jsonify(error_response), 500
+
+
+@app.route('/api/scan-stats')
+def api_scan_stats():
+    """API endpoint pour les statistiques de scan"""
+    try:
+        stats = db.get_wallet_scan_stats()
+        return jsonify({
+            'success': True,
+            'data': stats,
+            'timestamp': int(time.time())
+        })
+    except Exception as e:
+        app.logger.error(f"Erreur dans api_scan_stats(): {e}")
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+@app.route('/api/wallet/<address>')
+def api_wallet_detail(address):
+    """API endpoint pour les détails d'un wallet"""
+    try:
+        # Validation de l'adresse
+        if not address or len(address) != 42 or not address.startswith('0x'):
+            return jsonify({
+                'success': False,
+                'error': 'Invalid wallet address format'
+            }), 400
+        
+        # Récupérer les détails du wallet
+        wallet = db.get_wallet_details(address.lower())
+        if not wallet:
+            return jsonify({
+                'success': False,
+                'error': 'Wallet not found'
+            }), 404
+        
+        # Récupérer les tokens du wallet
+        tokens = db.get_wallet_tokens(address.lower())
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'wallet': wallet,
+                'tokens': tokens,
+                'token_count': len(tokens)
+            },
+            'timestamp': int(time.time())
+        })
+        
+    except Exception as e:
+        app.logger.error(f"Erreur dans api_wallet_detail({address}): {e}")
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
 
 
 @app.route('/debug/templates')
@@ -288,7 +898,8 @@ def debug_templates():
             'available_templates': [
                 'WALLETS_TEMPLATE',
                 'TOKENS_TEMPLATE', 
-                'ACTIVITY_TEMPLATE'
+                'ACTIVITY_TEMPLATE',
+                'WALLET_DETAIL_TEMPLATE'
             ],
             'helpers_loaded': [
                 'PaginationHelper',
@@ -297,19 +908,21 @@ def debug_templates():
                 'TemplateContextBuilder',
                 'ResponseHelper'
             ],
-            'fixes_applied': [
-                'block extra_styles defined twice: RESOLVED',
-                'Modular template structure: IMPLEMENTED',
-                'Separation of CSS and JavaScript: DONE',
-                'Professional refactoring: COMPLETED'
+            'new_features': [
+                'Wallet detail pages',
+                'Token holdings display',
+                'Scanner integration',
+                'API endpoints for wallets'
             ],
-            'code_quality': {
-                'helpers_used': True,
-                'error_handling': True,
-                'logging': True,
-                'validation': True,
-                'separation_of_concerns': True
-            }
+            'routes_available': [
+                '/ - Main wallet list',
+                '/tokens - Token list',
+                '/activity - Activity stats',
+                '/wallet/<address> - Wallet details',
+                '/api/stats - General stats API',
+                '/api/scan-stats - Scanner stats API',
+                '/api/wallet/<address> - Wallet API'
+            ]
         }
         
         return jsonify(debug_info)
@@ -390,12 +1003,15 @@ def main():
     print("✅ Templates modulaires chargés")
     print("🔧 Code refactorisé avec helpers")
     print("📊 Gestion d'erreurs améliorée")
+    print("🔗 Scanner de wallets intégré")
     print()
     print(f"🌙 Interface: http://{WEB_HOST}:{WEB_PORT}")
     print(f"📖 Wallets: http://{WEB_HOST}:{WEB_PORT}")
     print(f"🪙 Tokens: http://{WEB_HOST}:{WEB_PORT}/tokens")
     print(f"📈 Activity: http://{WEB_HOST}:{WEB_PORT}/activity")
+    print(f"👤 Wallet details: http://{WEB_HOST}:{WEB_PORT}/wallet/<address>")
     print(f"🔧 API Stats: http://{WEB_HOST}:{WEB_PORT}/api/stats")
+    print(f"📊 Scan Stats: http://{WEB_HOST}:{WEB_PORT}/api/scan-stats")
     print(f"🔍 Debug: http://{WEB_HOST}:{WEB_PORT}/debug/templates")
     print("🛑 Stop: Ctrl+C")
     
